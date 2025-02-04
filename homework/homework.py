@@ -1,3 +1,25 @@
+import os
+import gzip
+import pandas as pd
+import numpy as np
+import pickleM
+import json
+
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.decomposition import PCA
+from sklearn.model_selection import GridSearchCV
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
+    confusion_matrix
+)
+
 # flake8: noqa: E501
 #
 # En este dataset se desea pronosticar el default (pago) del cliente el próximo
@@ -96,117 +118,173 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+"""
+Función que permite cargar un dataset a partir de un archivo CSV.
+"""
+def load_dataset(path: str) -> pd.DataFrame:
+    return pd.read_csv(path, index_col=False, compression='zip')
 
-import os
-import gzip
-import pandas as pd
-import numpy as np
-import pickle
-import json
-from sklearn.compose import ColumnTransformer
-from sklearn.feature_selection import SelectKBest, f_regression
-from sklearn.decomposition import PCA
-from sklearn.model_selection import GridSearchCV
-from sklearn.neural_network import MLPClassifier
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import (
-    precision_score,
-    recall_score,
-    f1_score,
-    balanced_accuracy_score,
-    confusion_matrix
-)
+"""
+Función que permite limpiar un dataset.
+"""
+def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    new_df = df.copy()
+    new_df = new_df.rename(columns={'default payment next month': 'default'})
+    new_df = new_df.drop(columns=['ID'])
+    new_df = new_df.loc[new_df["MARRIAGE"] != 0]
+    new_df = new_df.loc[new_df["EDUCATION"] != 0]
+    new_df["EDUCATION"] = new_df["EDUCATION"].apply(lambda x: x if x < 4 else 4)
+    return new_df
 
-def cargar_datos(ruta: str) -> pd.DataFrame:
-    return pd.read_csv(ruta, index_col=False, compression='zip')
+"""
+Función que permite crear un pipeline de clasificación.
+"""
+def create_pipeline() -> Pipeline:
+    cat_features = ["SEX", "EDUCATION", "MARRIAGE"]
 
-def limpiar_datos(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.rename(columns={'default payment next month': 'default'})
-    df = df.drop(columns=['ID'])
-    df = df[df['MARRIAGE'] != 0]
-    df = df[df['EDUCATION'] != 0]
-    df['EDUCATION'] = df['EDUCATION'].apply(lambda x: x if x < 4 else 4)
-    return df
+    transformer = ColumnTransformer(
+        transformers=[
+            ('ohe', OneHotEncoder(dtype="int"), cat_features),
+        ],
+        remainder=StandardScaler(),
+    )
 
-def construir_pipeline() -> Pipeline:
-    categorias = ["SEX", "EDUCATION", "MARRIAGE"]
-    transformador = ColumnTransformer([
-        ('one_hot', OneHotEncoder(dtype="int"), categorias),
-    ], remainder=StandardScaler())
+    return Pipeline(
+        steps=[
+            ('tranformer', transformer),
+            ('pca', PCA(n_components=0.95)),
+            ('selectkbest', SelectKBest(score_func=f_regression)),
+            ('estimator',  MLPClassifier(max_iter=30000))
+        ],
+        verbose=False
+    )
+
+"""
+Función que permite crear un estimador para la optimización de hiperparametros.
+Utiliza validación cruzada con 10 splits y la función de precision balanceada.
+"""
+def create_estimator(pipeline: Pipeline, x: pd.DataFrame) -> GridSearchCV:
+    param_grid = {
+        "selectkbest__k": range(1, len(x.columns) + 1),
+        "estimator__hidden_layer_sizes": [(n,) for n in range(1, 11)],
+        "estimator__solver": ["adam"],
+        "estimator__learning_rate_init": [0.01, 0.001, 0.0001],
+    }
+
+    return GridSearchCV(
+        pipeline,
+        param_grid=param_grid,
+        cv=10,
+        scoring='balanced_accuracy',
+        verbose=2,
+        refit=True
+    )
+
+"""
+Función que permite guardar un modelo.
+"""
+def save_model(path: str, estimator: GridSearchCV):
+    with gzip.open(path, 'wb') as f:
+        pickle.dump(estimator, f)
+
+"""
+Función que permite calcular las métricas de precisión.
+"""
+def calculate_precision_metrics(dataset_name: str, y, y_pred) -> dict: 
+    return {
+        'type': 'metrics',
+        'dataset': dataset_name,
+	    'precision': precision_score(y, y_pred),
+	    'balanced_accuracy': balanced_accuracy_score(y, y_pred),
+	    'recall': recall_score(y, y_pred),
+	    'f1_score': f1_score(y, y_pred)
+    }
+
+"""
+Función que permite calcular las métricas de confusión.
+"""
+def calculate_confusion_metrics(dataset_name: str, y, y_pred) -> dict:
+    cm = confusion_matrix(y, y_pred)
+    return {
+        'type': 'cm_matrix',
+	    'dataset': dataset_name,
+	    'true_0': {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
+	    'true_1': {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])}
+    }
     
-    return Pipeline([
-        ('preprocesamiento', transformador),
-        ('reduccion_dimensionalidad', PCA(n_components=0.95)),
-        ('seleccion_atributos', SelectKBest(score_func=f_regression)),
-        ('modelo', MLPClassifier(max_iter=30000))
-    ])
 
-def optimizar_modelo(pipeline: Pipeline, x: pd.DataFrame) -> GridSearchCV:
-    parametros = {
-        "seleccion_atributos__k": range(1, len(x.columns) + 1),
-        "modelo__hidden_layer_sizes": [(n,) for n in range(1, 11)],
-        "modelo__solver": ["adam"],
-        "modelo__learning_rate_init": [0.01, 0.001, 0.0001],
-    }
-    return GridSearchCV(pipeline, param_grid=parametros, cv=10, scoring='balanced_accuracy', refit=True, verbose=2)
-
-def guardar_modelo(ruta: str, modelo: GridSearchCV):
-    with gzip.open(ruta, 'wb') as archivo:
-        pickle.dump(modelo, archivo)
-
-def calcular_metricas(nombre: str, y_real, y_predicho) -> dict:
-    return {
-        'tipo': 'metricas',
-        'conjunto': nombre,
-        'precision': precision_score(y_real, y_predicho),
-        'precision_balanceada': balanced_accuracy_score(y_real, y_predicho),
-        'recall': recall_score(y_real, y_predicho),
-        'f1_score': f1_score(y_real, y_predicho)
-    }
-
-def calcular_matriz_confusion(nombre: str, y_real, y_predicho) -> dict:
-    cm = confusion_matrix(y_real, y_predicho)
-    return {
-        'tipo': 'matriz_confusion',
-        'conjunto': nombre,
-        'true_0': {"predicho_0": int(cm[0][0]), "predicho_1": int(cm[0][1])},
-        'true_1': {"predicho_0": int(cm[1][0]), "predicho_1": int(cm[1][1])}
-    }
-
+"""
+Hilo de ejecución principal.
+"""
 def main():
-    ruta_datos = 'files/input/'
-    ruta_modelos = 'files/models/'
+    input_files_path = 'files/input/'
+    models_files_path = 'files/models/'
+
+    # Paso 1, Carga y limpieza de los datasets.
+    # Carga de los datasets.
+    test_df = load_dataset(os.path.join(input_files_path, 'test_data.csv.zip'))
+    train_df = load_dataset(os.path.join(input_files_path, 'train_data.csv.zip'))
+
+    # Limpieza de los datasets.
+    test_df = clean_dataset(test_df)
+    train_df = clean_dataset(train_df)
+
+
+
+    # Paso 2, División de los datasets.
+    x_test = test_df.drop(columns=['default'])
+    y_test = test_df['default']
+
+    x_train = train_df.drop(columns=['default'])
+    y_train = train_df['default']
+
+
+
+    # Paso 3, Creación del pipeline.
+    pipeline = create_pipeline()
+
+
+
+    # Paso 4, Optimización de los hiperparametros.
+    estimator = create_estimator(pipeline, x_train)
+    estimator.fit(x_train, y_train)
+
+
+
+    # Paso 5, Guardado del modelo
+    save_model(
+        os.path.join(models_files_path, 'model.pkl.gz'),
+        estimator,
+    )
+
     
-    test_df = cargar_datos(os.path.join(ruta_datos, 'test_data.csv.zip'))
-    train_df = cargar_datos(os.path.join(ruta_datos, 'train_data.csv.zip'))
-    
-    test_df = limpiar_datos(test_df)
-    train_df = limpiar_datos(train_df)
-    
-    x_test, y_test = test_df.drop(columns=['default']), test_df['default']
-    x_train, y_train = train_df.drop(columns=['default']), train_df['default']
-    
-    pipeline = construir_pipeline()
-    modelo = optimizar_modelo(pipeline, x_train)
-    modelo.fit(x_train, y_train)
-    
-    guardar_modelo(os.path.join(ruta_modelos, 'modelo.pkl.gz'), modelo)
-    
-    y_test_pred = modelo.predict(x_test)
-    y_train_pred = modelo.predict(x_train)
-    
-    metricas_test = calcular_metricas('test', y_test, y_test_pred)
-    metricas_train = calcular_metricas('train', y_train, y_train_pred)
-    
-    matriz_conf_test = calcular_matriz_confusion('test', y_test, y_test_pred)
-    matriz_conf_train = calcular_matriz_confusion('train', y_train, y_train_pred)
-    
-    with open('files/output/metricas.json', 'w') as archivo:
-        archivo.write(json.dumps(metricas_train) + '\n')
-        archivo.write(json.dumps(metricas_test) + '\n')
-        archivo.write(json.dumps(matriz_conf_train) + '\n')
-        archivo.write(json.dumps(matriz_conf_test) + '\n')
+
+    # Paso 6, Calcular las metricas de precisión
+    y_test_pred = estimator.predict(x_test)
+    test_precision_metrics = calculate_precision_metrics(
+        'test',
+        y_test,
+        y_test_pred
+    )
+    y_train_pred = estimator.predict(x_train)
+    train_precision_metrics = calculate_precision_metrics(
+        'train',
+        y_train,
+        y_train_pred
+    )
+
+
+
+    # Paso 7, Calcular metricas de confusión
+    test_confusion_metrics = calculate_confusion_metrics('test', y_test, y_test_pred)
+    train_confusion_metrics = calculate_confusion_metrics('train', y_train, y_train_pred)
+
+    with open('files/output/metrics.json', 'w') as file:
+        file.write(json.dumps(train_precision_metrics)+'\n')
+        file.write(json.dumps(test_precision_metrics)+'\n')
+        file.write(json.dumps(train_confusion_metrics)+'\n')
+        file.write(json.dumps(test_confusion_metrics)+'\n')
+
 
 if __name__ == "__main__":
     main()
